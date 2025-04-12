@@ -1,0 +1,16 @@
+torch 
+transformers 
+accelerate 
+bitsandbytes 
+langchain 
+sentence-transformers f
+aiss-cpu 
+openpyxl 
+pacmap  
+langchain-community 
+ragatouille
+langchain-huggingface
+langchain-groq
+gradio
+PYPDF2
+langchain-prompty
