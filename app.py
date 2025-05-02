@@ -1,14 +1,4 @@
-import gradio as gr
-from PyPDF2 import PdfReader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain.prompts import PromptTemplate
-from langchain_prompty import create_chat_prompt
-from langchain.chains.question_answering import load_qa_chain
-from langchain.chains import LLMChain
-from langchain.chains import RetrievalQA
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain_huggingface import HuggingFaceEndpoint# ------------------------------
+
 # PDF-based RAG QA system with Mistral + Gradio
 # ------------------------------
 
