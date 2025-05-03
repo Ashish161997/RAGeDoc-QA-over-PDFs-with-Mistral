@@ -4,7 +4,7 @@ accelerate
 bitsandbytes 
 langchain 
 sentence-transformers 
-aiss-cpu 
+faiss-cpu 
 openpyxl 
 pacmap  
 langchain-community 
