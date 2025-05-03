@@ -5,21 +5,18 @@ from PyPDF2 import PdfReader
 from transformers import (
     AutoTokenizer, pipeline,
     AutoModelForCausalLM, AutoConfig,
-    BitsAndBytesConfig, StoppingCriteria, StoppingCriteriaList
+    BitsAndBytesConfig
 )
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
-from langchain.chains.question_answering import load_qa_chain
-from langchain.chains import RetrievalQA
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.schema import Document
 from langchain import HuggingFacePipeline
-from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
 
 # ------------------------------
-# Device setup for CUDA
+# Device setup
 # ------------------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -40,7 +37,6 @@ embeddings = HuggingFaceEmbeddings(
 # Load Mistral model in 4bit
 # ------------------------------
 model_name = "mistralai/Mistral-7B-Instruct-v0.1"
-model_config = AutoConfig.from_pretrained(model_name)
 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "right"
@@ -53,7 +49,7 @@ bnb_config = BitsAndBytesConfig(
     bnb_4bit_compute_dtype=torch.float16
 )
 
-# Load model on device
+# Load model
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
     quantization_config=bnb_config,
@@ -61,7 +57,27 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 
 # ------------------------------
-# PDF Text Extraction
+# Improved Text Generation Pipeline
+# ------------------------------
+text_generation = pipeline(
+    model=model,
+    tokenizer=tokenizer,
+    task="text-generation",
+    temperature=0.7,
+    top_p=0.9,
+    top_k=50,
+    repetition_penalty=1.1,
+    return_full_text=False,
+    max_new_tokens=2000,
+    do_sample=True,
+    eos_token_id=tokenizer.eos_token_id,
+)
+
+# Wrap in LangChain interface
+mistral_llm = HuggingFacePipeline(pipeline=text_generation)
+
+# ------------------------------
+# PDF Processing Functions
 # ------------------------------
 def pdf_text(pdf_docs):
     text = ""
@@ -73,133 +89,198 @@ def pdf_text(pdf_docs):
                 text += page_text + "\n"
     return text
 
-# ------------------------------
-# Text Chunking
-# ------------------------------
 def get_chunks(text):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=50)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200,
+        length_function=len
+    )
     chunks = splitter.split_text(text)
     return [Document(page_content=chunk) for chunk in chunks]
 
-# ------------------------------
-# Build and save FAISS vectorstore
-# ------------------------------
 def get_vectorstore(documents):
     db = FAISS.from_documents(documents, embedding=embeddings)
     db.save_local("faiss_index")
 
 # ------------------------------
-# Custom stopping criteria for LLM
-# ------------------------------
-class StopOnCompleteAnswer(StoppingCriteria):
-    def __call__(self, input_ids, scores, **kwargs):
-        last_token = input_ids[0][-1].item()
-        return last_token in {
-            tokenizer.convert_tokens_to_ids("."),
-            tokenizer.convert_tokens_to_ids("?"),
-            tokenizer.convert_tokens_to_ids("!")
-        }
-
-# ------------------------------
-# HuggingFace pipeline with stopping
-# ------------------------------
-stopping_criteria = StoppingCriteriaList([StopOnCompleteAnswer()])
-text_generation = pipeline(
-    model=model,
-    tokenizer=tokenizer,
-    task="text-generation",
-    temperature=0.2,
-    return_full_text=False,
-    max_new_tokens=1500,
-    do_sample=True,
-    eos_token_id=tokenizer.eos_token_id,
-    stopping_criteria=stopping_criteria,
-)
-
-# Wrap in LangChain interface
-mistral_llm = HuggingFacePipeline(pipeline=text_generation)
-
-# ------------------------------
-# Prompt and Chains
+# Conversational Prompt Template
 # ------------------------------
 def get_qa_prompt():
-    prompt_template = """
-    ### [INST]
-    Answer the question below in a detailed but concise way. 
-    - End your response naturally with proper punctuation.
-    - If the answer is not in the context, say: "Not found in documents."
-
-    Context: {context}
-
-    Question: {question} 
-
-    [/INST]
-    Answer:"""
-    return PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-
-def format_docs(docs):
-    if isinstance(docs, list) and hasattr(docs[0], "page_content"):
-        return "\n\n".join(doc.page_content for doc in docs)
-    return docs
-
-def llm_chain_(prompt):
-    return LLMChain(llm=mistral_llm, prompt=prompt)
-
-def rag_chain_(llm_chain, retriever):
-    return {
-        "context": retriever | RunnableLambda(format_docs),
-        "question": RunnablePassthrough()
-    } | llm_chain
+    prompt_template = """<s>[INST] 
+    You are a helpful, knowledgeable AI assistant. Answer the user's question based on the provided context.
+    
+    Guidelines:
+    - Respond in a natural, conversational tone
+    - Be detailed but concise
+    - Use paragraphs and bullet points when appropriate
+    - If you don't know, say so
+    - Maintain a friendly and professional demeanor
+    
+    Conversation History:
+    {chat_history}
+    
+    Relevant Context:
+    {context}
+    
+    Current Question: {question} 
+    
+    Provide a helpful response: [/INST]"""
+    
+    return PromptTemplate(
+        template=prompt_template,
+        input_variables=["context", "question", "chat_history"]
+    )
 
 # ------------------------------
-# Upload handler
+# Chat Handling Functions
 # ------------------------------
 def handle_pdf_upload(pdf_files):
     try:
+        if not pdf_files:
+            return "⚠️ Please upload at least one PDF file"
+        
         text = pdf_text(pdf_files)
+        if not text.strip():
+            return "⚠️ Could not extract text from PDFs - please try different files"
+            
         chunks = get_chunks(text)
         get_vectorstore(chunks)
-        return "✅ PDFs processed and vectorstore saved successfully!"
+        return f"✅ Processed {len(pdf_files)} PDF(s) with {len(chunks)} text chunks"
     except Exception as e:
         return f"❌ Error: {str(e)}"
 
-# ------------------------------
-# Handle question from user
-# ------------------------------
+def format_chat_history(chat_history):
+    return "\n".join([f"User: {q}\nAssistant: {a}" for q, a in chat_history[-3:]])
+
 def user_query(msg, chat_history):
     if not os.path.exists("faiss_index"):
-        chat_history.append((msg, "Please upload PDFs first."))
+        chat_history.append((msg, "Please upload PDF documents first so I can help you."))
         return "", chat_history
     
-    db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-    retriever = db.as_retriever()
-    prompt = get_qa_prompt()
-    chain = llm_chain_(prompt)
-    rag_chain = rag_chain_(chain, retriever)
-    response = rag_chain.invoke(msg)
-    
-    # Append both user message and bot response to chat history
-    chat_history.append((msg, response["text"] if isinstance(response, dict) else response))
-    
-    return "", chat_history
-# ------------------------------
-# Gradio UI
-# ------------------------------
-with gr.Blocks() as demo:
-    gr.Markdown("# 🤖 RAGeDoc: Ask Questions From PDFs Conversationally")
+    try:
+        # Load vector store
+        db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
+        retriever = db.as_retriever(search_kwargs={"k": 3})
+        
+        # Get relevant context
+        docs = retriever.get_relevant_documents(msg)
+        context = "\n\n".join([d.page_content for d in docs])
+        
+        # Generate response
+        prompt = get_qa_prompt()
+        chain = LLMChain(llm=mistral_llm, prompt=prompt)
+        
+        response = chain.run({
+            "question": msg,
+            "context": context,
+            "chat_history": format_chat_history(chat_history)
+        })
+        
+        # Clean response
+        response = response.strip()
+        for end_token in ["</s>", "[INST]", "[/INST]"]:
+            if response.endswith(end_token):
+                response = response[:-len(end_token)].strip()
+        
+        chat_history.append((msg, response))
+        return "", chat_history
+        
+    except Exception as e:
+        error_msg = f"Sorry, I encountered an error: {str(e)}"
+        chat_history.append((msg, error_msg))
+        return "", chat_history
 
+# ------------------------------
+# Gradio Interface
+# ------------------------------
+with gr.Blocks(theme=gr.themes.Soft(), title="PDF Chat Assistant") as demo:
     with gr.Row():
-        pdf_input = gr.File(file_types=[".pdf"], file_count="multiple", label="Upload PDFs")
-        upload_btn = gr.Button("📄 Process PDFs")
-    status_box = gr.Textbox(label="Status", interactive=False)
+        gr.Markdown("""
+        # 📚 PDF Chat Assistant
+        ### Have natural conversations with your documents
+        """)
+    
+    with gr.Row():
+        with gr.Column(scale=1, min_width=300):
+            gr.Markdown("### Document Upload")
+            pdf_input = gr.File(
+                file_types=[".pdf"],
+                file_count="multiple",
+                label="Upload PDFs",
+                height=100
+            )
+            upload_btn = gr.Button("Process Documents", variant="primary")
+            status_box = gr.Textbox(label="Status", interactive=False)
+            gr.Markdown("""
+            **Instructions:**
+            1. Upload PDF documents
+            2. Click Process Documents
+            3. Start chatting in the right panel
+            """)
+        
+        with gr.Column(scale=2):
+            chatbot = gr.Chatbot(
+                height=600,
+                bubble_full_width=False,
+                avatar_images=(
+                    "user.png", 
+                    "bot.png"
+                )
+            )
+            
+            with gr.Row():
+                message = gr.Textbox(
+                    placeholder="Type your question about the documents...",
+                    show_label=False,
+                    container=False,
+                    scale=7,
+                    autofocus=True
+                )
+                submit_btn = gr.Button("Send", variant="primary", scale=1)
+            
+            with gr.Row():
+                clear_chat = gr.Button("🧹 Clear Conversation")
+                examples = gr.Examples(
+                    examples=[
+                        "Summarize the key points from the documents",
+                        "What are the main findings?",
+                        "Explain this in simpler terms"
+                    ],
+                    inputs=message,
+                    label="Example Questions"
+                )
 
-    chatbot = gr.Chatbot()
-    message = gr.Textbox(label="Your question", placeholder="Ask a question...")
-    clear = gr.Button("🧹 Clear Chat")
+    # Event handlers
+    upload_btn.click(
+        fn=handle_pdf_upload,
+        inputs=pdf_input,
+        outputs=status_box
+    )
+    
+    submit_btn.click(
+        fn=user_query,
+        inputs=[message, chatbot],
+        outputs=[message, chatbot]
+    )
+    
+    message.submit(
+        fn=user_query,
+        inputs=[message, chatbot],
+        outputs=[message, chatbot]
+    )
+    
+    clear_chat.click(
+        lambda: [],
+        None,
+        chatbot,
+        queue=False
+    )
 
-    upload_btn.click(fn=handle_pdf_upload, inputs=pdf_input, outputs=status_box)
-
-    message.submit(fn=user_query, inputs=[message, chatbot], outputs=[chatbot, chatbot])
-    clear.click(lambda: [], None, chatbot)
-
-demo.launch()
+# Launch the app
+if __name__ == "__main__":
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=7861,
+        share=True,
+        debug=True
+    )
