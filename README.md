@@ -37,6 +37,6 @@ To run chatbot
 ```python
 python app_chatbot.py
 ```
-![My Logo](rag.png)
+![My Logo](rag_doc.png)
 
 
