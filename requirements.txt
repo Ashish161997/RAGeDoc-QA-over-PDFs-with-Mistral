@@ -3,7 +3,7 @@ transformers
 accelerate 
 bitsandbytes 
 langchain 
-sentence-transformers f
+sentence-transformers 
 aiss-cpu 
 openpyxl 
 pacmap  
