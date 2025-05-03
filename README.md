@@ -33,3 +33,8 @@ Once that’s done…
 ```python
 python app.py
 ```
+To run chatbot
+```python
+python app_chatbot.py
+```
+
